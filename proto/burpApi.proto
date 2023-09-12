@@ -439,4 +439,3 @@ enum highlightColor {
   MAGENTA = 8;
   GRAY = 9;
 }
-
