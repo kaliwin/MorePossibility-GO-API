@@ -30,7 +30,8 @@ type BurpServerClient interface {
 	RegisterServerList(ctx context.Context, in *ServiceRegisterRoutingList, opts ...grpc.CallOption) (*ProcessingStatus, error)
 	// 获取代理历史请求 由于过滤会很复杂因此直接返回所有历史数据 入参为只占位符不用理睬
 	// 由于数据过大默认单个消息最大为500MB 客户端也需要处理 后续将提供分块传输 过滤提取等方式
-	GetProxyHistory(ctx context.Context, in *Str, opts ...grpc.CallOption) (*ProxyHistoryData, error)
+	// 修改为服务端流的方式进行流量传输
+	GetProxyHistory(ctx context.Context, in *Str, opts ...grpc.CallOption) (BurpServer_GetProxyHistoryClient, error)
 }
 
 type burpServerClient struct {
@@ -82,13 +83,36 @@ func (c *burpServerClient) RegisterServerList(ctx context.Context, in *ServiceRe
 	return out, nil
 }
 
-func (c *burpServerClient) GetProxyHistory(ctx context.Context, in *Str, opts ...grpc.CallOption) (*ProxyHistoryData, error) {
-	out := new(ProxyHistoryData)
-	err := c.cc.Invoke(ctx, "/burpApi.BurpServer/GetProxyHistory", in, out, opts...)
+func (c *burpServerClient) GetProxyHistory(ctx context.Context, in *Str, opts ...grpc.CallOption) (BurpServer_GetProxyHistoryClient, error) {
+	stream, err := c.cc.NewStream(ctx, &BurpServer_ServiceDesc.Streams[1], "/burpApi.BurpServer/GetProxyHistory", opts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &burpServerGetProxyHistoryClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type BurpServer_GetProxyHistoryClient interface {
+	Recv() (*HttpReqAndRes, error)
+	grpc.ClientStream
+}
+
+type burpServerGetProxyHistoryClient struct {
+	grpc.ClientStream
+}
+
+func (x *burpServerGetProxyHistoryClient) Recv() (*HttpReqAndRes, error) {
+	m := new(HttpReqAndRes)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // BurpServerServer is the server API for BurpServer service.
@@ -103,7 +127,8 @@ type BurpServerServer interface {
 	RegisterServerList(context.Context, *ServiceRegisterRoutingList) (*ProcessingStatus, error)
 	// 获取代理历史请求 由于过滤会很复杂因此直接返回所有历史数据 入参为只占位符不用理睬
 	// 由于数据过大默认单个消息最大为500MB 客户端也需要处理 后续将提供分块传输 过滤提取等方式
-	GetProxyHistory(context.Context, *Str) (*ProxyHistoryData, error)
+	// 修改为服务端流的方式进行流量传输
+	GetProxyHistory(*Str, BurpServer_GetProxyHistoryServer) error
 	mustEmbedUnimplementedBurpServerServer()
 }
 
@@ -117,8 +142,8 @@ func (UnimplementedBurpServerServer) RegisterRealTimeTrafficMirroring(*Str, Burp
 func (UnimplementedBurpServerServer) RegisterServerList(context.Context, *ServiceRegisterRoutingList) (*ProcessingStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RegisterServerList not implemented")
 }
-func (UnimplementedBurpServerServer) GetProxyHistory(context.Context, *Str) (*ProxyHistoryData, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetProxyHistory not implemented")
+func (UnimplementedBurpServerServer) GetProxyHistory(*Str, BurpServer_GetProxyHistoryServer) error {
+	return status.Errorf(codes.Unimplemented, "method GetProxyHistory not implemented")
 }
 func (UnimplementedBurpServerServer) mustEmbedUnimplementedBurpServerServer() {}
 
@@ -172,22 +197,25 @@ func _BurpServer_RegisterServerList_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _BurpServer_GetProxyHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Str)
-	if err := dec(in); err != nil {
-		return nil, err
+func _BurpServer_GetProxyHistory_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(Str)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(BurpServerServer).GetProxyHistory(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/burpApi.BurpServer/GetProxyHistory",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BurpServerServer).GetProxyHistory(ctx, req.(*Str))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(BurpServerServer).GetProxyHistory(m, &burpServerGetProxyHistoryServer{stream})
+}
+
+type BurpServer_GetProxyHistoryServer interface {
+	Send(*HttpReqAndRes) error
+	grpc.ServerStream
+}
+
+type burpServerGetProxyHistoryServer struct {
+	grpc.ServerStream
+}
+
+func (x *burpServerGetProxyHistoryServer) Send(m *HttpReqAndRes) error {
+	return x.ServerStream.SendMsg(m)
 }
 
 // BurpServer_ServiceDesc is the grpc.ServiceDesc for BurpServer service.
@@ -201,15 +229,16 @@ var BurpServer_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "RegisterServerList",
 			Handler:    _BurpServer_RegisterServerList_Handler,
 		},
-		{
-			MethodName: "GetProxyHistory",
-			Handler:    _BurpServer_GetProxyHistory_Handler,
-		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "RegisterRealTimeTrafficMirroring",
 			Handler:       _BurpServer_RegisterRealTimeTrafficMirroring_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "GetProxyHistory",
+			Handler:       _BurpServer_GetProxyHistory_Handler,
 			ServerStreams: true,
 		},
 	},
@@ -559,7 +588,7 @@ var ScoutServer_ServiceDesc = grpc.ServiceDesc{
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type IntruderPayloadProcessorServerClient interface {
 	// 迭代器载荷处理
-	IntruderPayloadProcessor(ctx context.Context, in *ByteData, opts ...grpc.CallOption) (*ByteData, error)
+	IntruderPayloadProcessor(ctx context.Context, in *PayloadProcessorData, opts ...grpc.CallOption) (*ByteData, error)
 }
 
 type intruderPayloadProcessorServerClient struct {
@@ -570,7 +599,7 @@ func NewIntruderPayloadProcessorServerClient(cc grpc.ClientConnInterface) Intrud
 	return &intruderPayloadProcessorServerClient{cc}
 }
 
-func (c *intruderPayloadProcessorServerClient) IntruderPayloadProcessor(ctx context.Context, in *ByteData, opts ...grpc.CallOption) (*ByteData, error) {
+func (c *intruderPayloadProcessorServerClient) IntruderPayloadProcessor(ctx context.Context, in *PayloadProcessorData, opts ...grpc.CallOption) (*ByteData, error) {
 	out := new(ByteData)
 	err := c.cc.Invoke(ctx, "/burpApi.IntruderPayloadProcessorServer/IntruderPayloadProcessor", in, out, opts...)
 	if err != nil {
@@ -584,7 +613,7 @@ func (c *intruderPayloadProcessorServerClient) IntruderPayloadProcessor(ctx cont
 // for forward compatibility
 type IntruderPayloadProcessorServerServer interface {
 	// 迭代器载荷处理
-	IntruderPayloadProcessor(context.Context, *ByteData) (*ByteData, error)
+	IntruderPayloadProcessor(context.Context, *PayloadProcessorData) (*ByteData, error)
 	mustEmbedUnimplementedIntruderPayloadProcessorServerServer()
 }
 
@@ -592,7 +621,7 @@ type IntruderPayloadProcessorServerServer interface {
 type UnimplementedIntruderPayloadProcessorServerServer struct {
 }
 
-func (UnimplementedIntruderPayloadProcessorServerServer) IntruderPayloadProcessor(context.Context, *ByteData) (*ByteData, error) {
+func (UnimplementedIntruderPayloadProcessorServerServer) IntruderPayloadProcessor(context.Context, *PayloadProcessorData) (*ByteData, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method IntruderPayloadProcessor not implemented")
 }
 func (UnimplementedIntruderPayloadProcessorServerServer) mustEmbedUnimplementedIntruderPayloadProcessorServerServer() {
@@ -610,7 +639,7 @@ func RegisterIntruderPayloadProcessorServerServer(s grpc.ServiceRegistrar, srv I
 }
 
 func _IntruderPayloadProcessorServer_IntruderPayloadProcessor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ByteData)
+	in := new(PayloadProcessorData)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -622,7 +651,7 @@ func _IntruderPayloadProcessorServer_IntruderPayloadProcessor_Handler(srv interf
 		FullMethod: "/burpApi.IntruderPayloadProcessorServer/IntruderPayloadProcessor",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(IntruderPayloadProcessorServerServer).IntruderPayloadProcessor(ctx, req.(*ByteData))
+		return srv.(IntruderPayloadProcessorServerServer).IntruderPayloadProcessor(ctx, req.(*PayloadProcessorData))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1099,6 +1128,9 @@ type GetConTextMenuItemsServerServer interface {
 type UnimplementedGetConTextMenuItemsServerServer struct {
 }
 
+func (UnimplementedGetConTextMenuItemsServerServer) GetConTextMenuItems(context.Context, *Str) (*MenuInfo, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConTextMenuItems not implemented")
+}
 func (UnimplementedGetConTextMenuItemsServerServer) mustEmbedUnimplementedGetConTextMenuItemsServerServer() {
 }
 
@@ -1323,8 +1355,8 @@ var ProxyResponseHandler_ServiceDesc = grpc.ServiceDesc{
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type HttpFlowHandlerClient interface {
-	HttpHandleRequestReceived(ctx context.Context, in *HttpReqGroup, opts ...grpc.CallOption) (*HttpRequestAction, error)
-	HttpHandleResponseReceived(ctx context.Context, in *HttpReqAndRes, opts ...grpc.CallOption) (*HttpResponseAction, error)
+	HttpHandleRequestReceived(ctx context.Context, in *HttpFlowReqData, opts ...grpc.CallOption) (*HttpRequestAction, error)
+	HttpHandleResponseReceived(ctx context.Context, in *HttpFlowResData, opts ...grpc.CallOption) (*HttpResponseAction, error)
 }
 
 type httpFlowHandlerClient struct {
@@ -1335,7 +1367,7 @@ func NewHttpFlowHandlerClient(cc grpc.ClientConnInterface) HttpFlowHandlerClient
 	return &httpFlowHandlerClient{cc}
 }
 
-func (c *httpFlowHandlerClient) HttpHandleRequestReceived(ctx context.Context, in *HttpReqGroup, opts ...grpc.CallOption) (*HttpRequestAction, error) {
+func (c *httpFlowHandlerClient) HttpHandleRequestReceived(ctx context.Context, in *HttpFlowReqData, opts ...grpc.CallOption) (*HttpRequestAction, error) {
 	out := new(HttpRequestAction)
 	err := c.cc.Invoke(ctx, "/burpApi.HttpFlowHandler/HttpHandleRequestReceived", in, out, opts...)
 	if err != nil {
@@ -1344,7 +1376,7 @@ func (c *httpFlowHandlerClient) HttpHandleRequestReceived(ctx context.Context, i
 	return out, nil
 }
 
-func (c *httpFlowHandlerClient) HttpHandleResponseReceived(ctx context.Context, in *HttpReqAndRes, opts ...grpc.CallOption) (*HttpResponseAction, error) {
+func (c *httpFlowHandlerClient) HttpHandleResponseReceived(ctx context.Context, in *HttpFlowResData, opts ...grpc.CallOption) (*HttpResponseAction, error) {
 	out := new(HttpResponseAction)
 	err := c.cc.Invoke(ctx, "/burpApi.HttpFlowHandler/HttpHandleResponseReceived", in, out, opts...)
 	if err != nil {
@@ -1357,8 +1389,8 @@ func (c *httpFlowHandlerClient) HttpHandleResponseReceived(ctx context.Context, 
 // All implementations must embed UnimplementedHttpFlowHandlerServer
 // for forward compatibility
 type HttpFlowHandlerServer interface {
-	HttpHandleRequestReceived(context.Context, *HttpReqGroup) (*HttpRequestAction, error)
-	HttpHandleResponseReceived(context.Context, *HttpReqAndRes) (*HttpResponseAction, error)
+	HttpHandleRequestReceived(context.Context, *HttpFlowReqData) (*HttpRequestAction, error)
+	HttpHandleResponseReceived(context.Context, *HttpFlowResData) (*HttpResponseAction, error)
 	mustEmbedUnimplementedHttpFlowHandlerServer()
 }
 
@@ -1366,10 +1398,10 @@ type HttpFlowHandlerServer interface {
 type UnimplementedHttpFlowHandlerServer struct {
 }
 
-func (UnimplementedHttpFlowHandlerServer) HttpHandleRequestReceived(context.Context, *HttpReqGroup) (*HttpRequestAction, error) {
+func (UnimplementedHttpFlowHandlerServer) HttpHandleRequestReceived(context.Context, *HttpFlowReqData) (*HttpRequestAction, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HttpHandleRequestReceived not implemented")
 }
-func (UnimplementedHttpFlowHandlerServer) HttpHandleResponseReceived(context.Context, *HttpReqAndRes) (*HttpResponseAction, error) {
+func (UnimplementedHttpFlowHandlerServer) HttpHandleResponseReceived(context.Context, *HttpFlowResData) (*HttpResponseAction, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HttpHandleResponseReceived not implemented")
 }
 func (UnimplementedHttpFlowHandlerServer) mustEmbedUnimplementedHttpFlowHandlerServer() {}
@@ -1386,7 +1418,7 @@ func RegisterHttpFlowHandlerServer(s grpc.ServiceRegistrar, srv HttpFlowHandlerS
 }
 
 func _HttpFlowHandler_HttpHandleRequestReceived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HttpReqGroup)
+	in := new(HttpFlowReqData)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -1398,13 +1430,13 @@ func _HttpFlowHandler_HttpHandleRequestReceived_Handler(srv interface{}, ctx con
 		FullMethod: "/burpApi.HttpFlowHandler/HttpHandleRequestReceived",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HttpFlowHandlerServer).HttpHandleRequestReceived(ctx, req.(*HttpReqGroup))
+		return srv.(HttpFlowHandlerServer).HttpHandleRequestReceived(ctx, req.(*HttpFlowReqData))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _HttpFlowHandler_HttpHandleResponseReceived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HttpReqAndRes)
+	in := new(HttpFlowResData)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -1416,7 +1448,7 @@ func _HttpFlowHandler_HttpHandleResponseReceived_Handler(srv interface{}, ctx co
 		FullMethod: "/burpApi.HttpFlowHandler/HttpHandleResponseReceived",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HttpFlowHandlerServer).HttpHandleResponseReceived(ctx, req.(*HttpReqAndRes))
+		return srv.(HttpFlowHandlerServer).HttpHandleResponseReceived(ctx, req.(*HttpFlowResData))
 	}
 	return interceptor(ctx, in, info, handler)
 }
